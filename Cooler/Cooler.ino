@@ -24,6 +24,7 @@
 #include <RTClib.h>
 #include <Wire.h>
 #include <LiquidCrystal.h>
+#include <Stepper.h>
 
 #define RDA 0x80
 #define TBE 0x20
@@ -46,6 +47,20 @@ RTC_DS1307 rtc;
 const int rs = 25, en = 23, d4 = 28, d5 = 26, d6 = 24, d7 = 22;
 LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
 
+const unsigned int STEPS_TOTAL = 32;
+const unsigned int STEPPER_PIN_IN1 = 37;
+const unsigned int STEPPER_PIN_IN2 = 39;
+const unsigned int STEPPER_PIN_IN3 = 41;
+const unsigned int STEPPER_PIN_IN4 = 43;
+
+unsigned int potValueVent = 0;
+unsigned int prevPotValueVent = 0;
+
+Stepper ventStepperController(STEPS_TOTAL
+                          ,STEPPER_PIN_IN1
+                          ,STEPPER_PIN_IN3
+                          ,STEPPER_PIN_IN2
+                          ,STEPPER_PIN_IN4);
 
 
 //monitoring minutes (update/read temp every minute that passes)
@@ -54,13 +69,13 @@ unsigned int previousMin = 61;  //impossible value to read on first loop and pre
 
 //holds water Level
 volatile unsigned int waterLevel = 0;
-unsigned int waterLevelThreshold = 230;
+unsigned int waterLevelThreshold = 200;
 unsigned int AnalogPinWaterReadIn = 7;
 
 //Records for Temp and Humidity
 volatile unsigned int Temp = 0;
 volatile unsigned int Humidity = 0;
-unsigned int TempThreshold = 10;
+unsigned int TempThreshold = 10; //50
 
 //For reading in from ADC and Serial Ports
 volatile unsigned char *myUCSR0A = (unsigned char *)0x00C0;
@@ -86,16 +101,24 @@ volatile unsigned char* port_l = (unsigned char*) 0x10B;
 volatile unsigned char* ddr_l = (unsigned char*) 0x10A; 
 volatile unsigned char* pin_l  = (unsigned char*) 0x109; 
 
-//WaterSensorpin is PB7 ;
+//DC MOTOR/FAN
+//PH4 PH5 PH6
+//Digital Pin 7 = Enable
+//Digital Pin 8 = Direction A
+//Digital Pin 9 = Direction B
+
+volatile unsigned char* port_h = (unsigned char*) 0x102; 
+volatile unsigned char* ddr_h = (unsigned char*) 0x101; 
+volatile unsigned char* pin_h  = (unsigned char*) 0x100; 
 
 
 //EVENT MESSAGES
 const char* tempHumidityMessage = "Monitored Temp/Humidity: ";
 const char* waterLevelMessage = "Water Level is ";
-const char* DISABLED_MESSAGE = "DISABLED STATE";
-const char* IDLE_MESSAGE = "IDLE STATE";
+const char* DISABLED_MESSAGE = "DISABLED STATE - FAN OFF";
+const char* IDLE_MESSAGE = "IDLE STATE - FAN OFF";
 const char* ERROR_MESSAGE = "ERROR: Water Level is Too Low!";
-const char* RUNNING_MESSAGE = "RUNNING STATE";
+const char* RUNNING_MESSAGE = "FAN RUNNING STATE";
 
 
 void setup() {
@@ -116,7 +139,9 @@ void setup() {
   //Set PL1 and PL0 to OUTPUT (YELLOW, RED LED)
   *ddr_l |= 0b00000011;
 
-
+  //DC Motor
+  //Set Enable, Direction A and B to Output (PH4,PH5,PH6)
+  *ddr_h |= 0b01110000;
 
   //constant monitoring of State Button, interrupts when pressed (turn ON System) assumed off at start
   attachInterrupt(digitalPinToInterrupt(StateButton), StateButtonPressedISR, RISING);
@@ -128,13 +153,26 @@ void setup() {
   //begins LCD to print Temp and Humidity
   lcd.begin(16, 2);
 
+  ventStepperController.setSpeed(15);
+
 }
 
 void loop() {
 
 
-  delay(500);
+  //delay(500);
   lcd.clear();
+
+  if(previousStatePosition != "RUNNING") {
+    
+    //turn fan off if On
+    if(*pin_h & (1<<4)) {*port_h &= ~((1 << 4));}
+
+    if(*pin_h & (1<<5)) {
+      recordEvent("FAN/MOTOR TURNED OFF");
+      *port_h &= ~(1 << 5);
+    }
+  }
 
   //DISABLED STATE
   if(OnState == false) {
@@ -151,8 +189,6 @@ void loop() {
     //if BLUE PB3 HUGH< TURN LOW
     else if(*pin_b & (1<<3)) {*port_b &= ~((1 << 3));}
 
-    //turn fan off
-
     //yellow LED On
     *port_l |= (1 << 1);
     //makeLEDHigh(*port_l,1);
@@ -165,17 +201,31 @@ void loop() {
   //assumed OnState
   else {
 
+    //checks for Analog Data from Potionmeter for Vent Control
+    potValueVent = adc_read(15);
+
+    if(potValueVent > (prevPotValueVent + 10 )) {
+      //move vent 6 steps clockwise
+      controlVent(6);      
+    }
+    else if(potValueVent < (prevPotValueVent + 10)) {
+      //move vent 6 steps counter-clockwise
+      controlVent(-6);      
+    }
+    //sets prev to current for next iteration/comparision
+    //prevPotValueVent = potValueVent;
+
+
     //TURN YELLOW LED OFF
     if(*pin_l & (1<<1)) {
        *port_l &= ~((1 << 1));
     }
 
+    
+
     //display LCD again
     lcd.display();
 
-    //turn off YELLOW LED
-    //*port_l &= ~((1 << 1));
-    
     //Monitor Water Level (Using Water Sensor Module)
     //saves to WaterLevel
     *port_b |= (1 << 7);
@@ -204,8 +254,6 @@ void loop() {
 
       previousStatePosition = "ERROR";
 
-      //RED LED OFF (PL0)
-      //*port_l = 0b00000000;
     }
 
     //IDLE (WaterLevel is Healthy) or RUNNING State
@@ -243,7 +291,9 @@ void loop() {
 
         recordEvent(RUNNING_MESSAGE);
 
-        //Run Fan
+        //Run Fan (ENABLE AND DIRECTION A)
+        *port_h |= (1 << 4);
+        *port_h |= (1 << 5);
 
         //if GREEN PB2 HIGH, turn LOW
         if(*pin_b & (1<<2)) {
@@ -269,13 +319,7 @@ void loop() {
         //GREEN LED ON (PB2)
         *port_b |= (1 << 2);
 
-
-        //FAN OFF
-
         previousStatePosition = "IDLE";
-
-        //turn GREEN LED OFF
-        //*port_b = 0b00000000;
 
       }
     }
@@ -330,6 +374,14 @@ void displayTime() {
 void StateButtonPressedISR() {
   Serial.println("CHANGING ON/OFF");
   OnState = (!OnState);
+}
+
+void controlVent(int steps) {
+
+  //RECORDS WHEN VENT IS MOVED
+  recordEvent("VENT CONTROL ACTIVATED");
+  ventStepperController.step(steps);  
+  
 }
 
 void makeLEDHigh(volatile unsigned char* port, int pos) {
