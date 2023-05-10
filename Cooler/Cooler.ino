@@ -358,15 +358,15 @@ void recordEvent(char* message) {
 void displayTime() {
   DateTime timeNow = rtc.now();
   Serial.print(timeNow.year(), DEC);
-  Serial.print("/");
+  U0putchar("/");
   Serial.print(timeNow.month(),DEC);
-  Serial.print("/");
+  U0putchar("/");
   Serial.print(timeNow.day(),DEC);
-  Serial.print(" ");
+  U0putchar("/");
   Serial.print(timeNow.hour(),DEC);
-  Serial.print(":");
+  U0putchar("/");
   Serial.print(timeNow.minute(),DEC);
-  Serial.print(":");
+  U0putchar("/");
   Serial.print(timeNow.second());
 }
 
